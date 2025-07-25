@@ -112,8 +112,8 @@ monitor_fail2ban() {
 # ========== MAIN MENU ==========
 while true; do
     echo -e "\n${BLUE}========= Fail2Ban Manager =========${NC}"
-    echo -e "\n${BLUE}=== (c) 2025 MeghnaCloud - BDCCL ===${NC}"
-    echo -e "${YELLOW}1${NC}) Install Fail2Ban SSH protection"
+    echo -e "${BLUE}(c) 2025 MeghnaCloud - BDCCL${NC}"
+    echo -e "\n${YELLOW}1${NC}) Install Fail2Ban SSH protection"
     echo -e "${YELLOW}2${NC}) Remove Fail2Ban and all configs"
     echo -e "${YELLOW}3${NC}) Monitor/Report Fail2Ban activity"
     echo -e "${YELLOW}q${NC}) Quit"
