@@ -42,20 +42,49 @@ check_binary() {
     command -v "$1" >/dev/null 2>&1 || { log_error "'$1' is required but not installed."; exit 1; }
 }
 
-# ========== EPEL & Fail2Ban Installer ==========
-install_fail2ban() {
-    log_info "Installing EPEL and Fail2Ban..."
-
+# ========== Detect package manager ==========
+get_pkg_mgr() {
     if command -v dnf >/dev/null 2>&1; then
-        dnf install -y epel-release || dnf install -y https://mirrors.aliyun.com/epel/epel-release-latest-$(rpm -E %{rhel}).noarch.rpm
-        dnf install -y fail2ban
+        echo "dnf"
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y epel-release || yum install -y https://mirrors.aliyun.com/epel/epel-release-latest-7.noarch.rpm
-        yum install -y fail2ban
+        echo "yum"
     else
-        log_error "Neither yum nor dnf found!"
+        log_error "No supported package manager found (yum or dnf)."
         exit 1
     fi
+}
+
+# ========== EPEL installer with manual fallback ==========
+install_epel() {
+    if ! rpm -q epel-release &>/dev/null; then
+        log_info "Installing EPEL repository manually..."
+        cd /tmp || exit 1
+
+        # Try downloading with curl or wget
+        if ! curl -sLO https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm; then
+            if ! wget https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm; then
+                log_error "Failed to download EPEL RPM. Please check your network."
+                exit 1
+            fi
+        fi
+
+        yum install -y epel-release-latest-7.noarch.rpm || {
+            log_error "Failed to install EPEL repository."
+            exit 1
+        }
+    else
+        log_info "EPEL repository already installed."
+    fi
+}
+
+# ========== Install Fail2Ban ==========
+install_fail2ban() {
+    PKG_MGR=$(get_pkg_mgr)
+
+    log_info "Installing EPEL and Fail2Ban..."
+    install_epel
+
+    $PKG_MGR install -y fail2ban
 
     systemctl enable fail2ban
     systemctl start fail2ban
@@ -74,28 +103,27 @@ install_fail2ban() {
     log_done "Fail2Ban installed and SSH protection configured."
 }
 
-# ========== Uninstaller ==========
+# ========== Remove Fail2Ban ==========
 remove_fail2ban() {
     read -rp "$(echo -e "${YELLOW}Are you sure you want to remove Fail2Ban? [y/N]: ${NC}")" confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        PKG_MGR=$(get_pkg_mgr)
+
         log_info "Stopping Fail2Ban..."
         systemctl stop fail2ban
 
-        if command -v dnf >/dev/null 2>&1; then
-            dnf remove -y fail2ban
-        elif command -v yum >/dev/null 2>&1; then
-            yum remove -y fail2ban
-        fi
+        $PKG_MGR remove -y fail2ban
 
-        log_info "Removing configs..."
+        log_info "Removing Fail2Ban configs and logs..."
         rm -rf /etc/fail2ban /var/log/fail2ban.log /var/lib/fail2ban /var/run/fail2ban
+
         log_done "Fail2Ban completely removed."
     else
         log_info "Uninstall aborted."
     fi
 }
 
-# ========== Monitor ==========
+# ========== Monitor Fail2Ban ==========
 monitor_fail2ban() {
     while true; do
         echo -e "\n${CYAN}========= Fail2Ban Monitor =========${NC}"
@@ -108,9 +136,16 @@ monitor_fail2ban() {
         read -rp "$(echo -e "${CYAN}Choose an option: ${NC}")" monitor_choice
 
         case "$monitor_choice" in
-            1) log_info "Press Ctrl+C to stop logs."; tail -f /var/log/fail2ban.log ;;
-            2) fail2ban-client status sshd || log_warn "SSH jail not found." ;;
-            3) fail2ban-client status || log_warn "Fail2Ban status not available." ;;
+            1)
+                log_info "Press Ctrl+C to stop logs."
+                tail -f /var/log/fail2ban.log
+                ;;
+            2)
+                fail2ban-client status sshd || log_warn "SSH jail not found."
+                ;;
+            3)
+                fail2ban-client status || log_warn "Fail2Ban status not available."
+                ;;
             4)
                 if command -v nft >/dev/null && nft list ruleset 2>/dev/null | grep -q fail2ban; then
                     echo -e "${YELLOW}[+] nftables rules detected:${NC}"
@@ -126,8 +161,12 @@ monitor_fail2ban() {
                     log_warn "No ban rules found."
                 fi
                 ;;
-            q|Q) break ;;
-            *) log_warn "Invalid option." ;;
+            q|Q)
+                break
+                ;;
+            *)
+                log_warn "Invalid option."
+                ;;
         esac
     done
 }
@@ -151,11 +190,16 @@ main_menu() {
             1) install_fail2ban ;;
             2) remove_fail2ban ;;
             3) monitor_fail2ban ;;
-            q|Q) log_done "Goodbye!"; exit 0 ;;
-            *) log_warn "Invalid option." ;;
+            q|Q)
+                log_done "Goodbye!"
+                exit 0
+                ;;
+            *)
+                log_warn "Invalid option."
+                ;;
         esac
     done
 }
 
-# ========== Start ==========
+# ========== Start Script ==========
 main_menu
