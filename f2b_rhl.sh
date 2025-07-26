@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# ========== Fail2Ban Manager (Production Ready) for RHEL/CentOS ==========
-
+# ========== Fail2Ban Manager (RedHat/CentOS Compatible) ==========
 clear
 set -euo pipefail
 
@@ -19,7 +18,7 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_done()  { echo -e "${GREEN}[✔]${NC} $*"; }
 
-# ========== Custom SSHD Jail Block (for RHEL/CentOS) ==========
+# ========== Custom SSHD Jail Block ==========
 CUSTOM_SSHD_BLOCK="[sshd]
 enabled = true
 port = ssh
@@ -45,9 +44,15 @@ check_binary() {
 
 # ========== Install Fail2Ban ==========
 install_fail2ban() {
+    if command -v dnf >/dev/null 2>&1; then
+        PKG_MGR="dnf"
+    else
+        PKG_MGR="yum"
+    fi
+
     log_info "Installing EPEL and Fail2Ban..."
-    dnf install -y epel-release
-    dnf install -y fail2ban
+    $PKG_MGR install -y epel-release
+    $PKG_MGR install -y fail2ban
 
     log_info "Enabling and starting fail2ban service..."
     systemctl enable fail2ban
@@ -74,8 +79,14 @@ remove_fail2ban() {
         log_info "Stopping Fail2Ban..."
         systemctl stop fail2ban
 
+        if command -v dnf >/dev/null 2>&1; then
+            PKG_MGR="dnf"
+        else
+            PKG_MGR="yum"
+        fi
+
         log_info "Removing packages and config..."
-        dnf remove -y fail2ban
+        $PKG_MGR remove -y fail2ban
         rm -rf /etc/fail2ban /var/log/fail2ban.log /var/lib/fail2ban /var/run/fail2ban
 
         log_done "Fail2Ban completely removed."
