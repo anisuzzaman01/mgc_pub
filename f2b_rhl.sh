@@ -54,7 +54,7 @@ get_pkg_mgr() {
     fi
 }
 
-# ========== EPEL installer with manual fallback ==========
+# ========== EPEL installer with fixed download location ==========
 install_epel() {
     if rpm -q epel-release &>/dev/null; then
         log_info "EPEL repository already installed."
@@ -62,19 +62,22 @@ install_epel() {
     fi
 
     log_info "Installing EPEL repository manually..."
-    local epel_rpm="/tmp/epel-release-latest-7.noarch.rpm"
 
-    # Remove old file if exists
+    local epel_rpm="epel-release-latest-7.noarch.rpm"
+    local epel_rpm_tmp="/tmp/${epel_rpm}"
+
+    # Clean old files if exist
     [[ -f "$epel_rpm" ]] && rm -f "$epel_rpm"
+    [[ -f "$epel_rpm_tmp" ]] && rm -f "$epel_rpm_tmp"
 
-    # Try download with curl or wget
+    # Download to current dir
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$epel_rpm" https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm || {
+        curl -LO https://dl.fedoraproject.org/pub/epel/${epel_rpm} || {
             log_error "curl failed to download EPEL RPM."
             exit 1
         }
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$epel_rpm" https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm || {
+        wget https://dl.fedoraproject.org/pub/epel/${epel_rpm} || {
             log_error "wget failed to download EPEL RPM."
             exit 1
         }
@@ -83,19 +86,21 @@ install_epel() {
         exit 1
     fi
 
-    # Check if file exists and is not empty
-    if [[ ! -s "$epel_rpm" ]]; then
-        log_error "EPEL RPM file not found or empty: $epel_rpm"
+    # Move to /tmp explicitly
+    mv "$epel_rpm" "$epel_rpm_tmp"
+
+    # Verify
+    if [[ ! -s "$epel_rpm_tmp" ]]; then
+        log_error "EPEL RPM file not found or empty: $epel_rpm_tmp"
         exit 1
     fi
 
-    yum install -y "$epel_rpm" || {
+    yum install -y "$epel_rpm_tmp" || {
         log_error "Failed to install EPEL repository."
         exit 1
     }
 
-    # Clean up downloaded RPM file
-    rm -f "$epel_rpm"
+    rm -f "$epel_rpm_tmp"
 }
 
 # ========== Install Fail2Ban ==========
@@ -192,4 +197,35 @@ monitor_fail2ban() {
     done
 }
 
-# ========== Main
+# ========== Main Menu ==========
+main_menu() {
+    check_root
+    check_binary systemctl
+    check_binary iptables
+
+    while true; do
+        echo -e "\n${BLUE}========= Fail2Ban Manager =========${NC}"
+        echo -e "${YELLOW}1${NC}) Install Fail2Ban SSH protection"
+        echo -e "${YELLOW}2${NC}) Remove Fail2Ban and all configs"
+        echo -e "${YELLOW}3${NC}) Monitor/Report Fail2Ban activity"
+        echo -e "${YELLOW}q${NC}) Quit"
+        echo -e "${BLUE}====================================${NC}"
+        read -rp "$(echo -e "${CYAN}Choose an option: ${NC}")" main_choice
+
+        case "$main_choice" in
+            1) install_fail2ban ;;
+            2) remove_fail2ban ;;
+            3) monitor_fail2ban ;;
+            q|Q)
+                log_done "Goodbye!"
+                exit 0
+                ;;
+            *)
+                log_warn "Invalid option."
+                ;;
+        esac
+    done
+}
+
+# ========== Start Script ==========
+main_menu
