@@ -30,6 +30,18 @@ bantime = 3600
 backend = systemd
 action = iptables[name=SSH, port=ssh, protocol=tcp]"
 
+# ========== Detect Package Manager ==========
+detect_pkg_mgr() {
+    if command -v dnf >/dev/null 2>&1; then
+        echo "dnf"
+    elif command -v yum >/dev/null 2>&1; then
+        echo "yum"
+    else
+        log_error "Neither dnf nor yum found. Cannot continue."
+        exit 1
+    fi
+}
+
 # ========== Prerequisite Checks ==========
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -44,14 +56,17 @@ check_binary() {
 
 # ========== Install Fail2Ban ==========
 install_fail2ban() {
-    if command -v dnf >/dev/null 2>&1; then
-        PKG_MGR="dnf"
-    else
-        PKG_MGR="yum"
-    fi
+    PKG_MGR=$(detect_pkg_mgr)
 
     log_info "Installing EPEL and Fail2Ban..."
-    $PKG_MGR install -y epel-release
+    if ! rpm -q epel-release >/dev/null 2>&1; then
+        if [[ "$PKG_MGR" == "yum" ]]; then
+            yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+        else
+            $PKG_MGR install -y epel-release
+        fi
+    fi
+
     $PKG_MGR install -y fail2ban
 
     log_info "Enabling and starting fail2ban service..."
@@ -79,11 +94,7 @@ remove_fail2ban() {
         log_info "Stopping Fail2Ban..."
         systemctl stop fail2ban
 
-        if command -v dnf >/dev/null 2>&1; then
-            PKG_MGR="dnf"
-        else
-            PKG_MGR="yum"
-        fi
+        PKG_MGR=$(detect_pkg_mgr)
 
         log_info "Removing packages and config..."
         $PKG_MGR remove -y fail2ban
