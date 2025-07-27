@@ -1,98 +1,76 @@
 #!/bin/bash
 
-# Fail2Ban Manager with OS detection and EPEL fix
-set -e
+# Fail2Ban Interactive Installer and Manager for CentOS/RHEL
+# Supports RHEL/CentOS 7, 8, 9
 
-EPEL_URL_C7="https://mirrors.aliyun.com/epel/epel-release-latest-7.noarch.rpm"
-EPEL_URL_C8="https://mirrors.aliyun.com/epel/epel-release-latest-8.noarch.rpm"
-EPEL_URL_C9="https://mirrors.aliyun.com/epel/epel-release-latest-9.noarch.rpm"
+install_epel() {
+    echo "[INFO] Detecting OS version..."
+    OS_VERSION=$(rpm -q --qf "%{VERSION}" centos-release 2>/dev/null || rpm -q --qf "%{VERSION}" redhat-release 2>/dev/null)
 
-function detect_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS_ID=$ID
-        OS_VERSION_ID=${VERSION_ID%%.*}
-    elif [ -f /etc/centos-release ]; then
-        OS_ID="centos"
-        OS_VERSION_ID=$(rpm -q --qf "%{VERSION}" centos-release)
-    else
-        echo "[ERROR] Unsupported OS."
-        exit 1
-    fi
-}
-
-function install_epel() {
-    echo "[INFO] Installing EPEL repository..."
-
-    local epel_url=""
-    case "$OS_VERSION_ID" in
-        7) epel_url=$EPEL_URL_C7 ;;
-        8) epel_url=$EPEL_URL_C8 ;;
-        9) epel_url=$EPEL_URL_C9 ;;
-        *) echo "[ERROR] Unsupported RHEL/CentOS version"; exit 1 ;;
+    case "$OS_VERSION" in
+        7)
+            EPEL_URL="https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm"
+            ;;
+        8)
+            EPEL_URL="https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+            ;;
+        9)
+            EPEL_URL="https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
+            ;;
+        *)
+            echo "[ERROR] Unsupported OS version: $OS_VERSION"
+            return 1
+            ;;
     esac
 
-    curl -Lo /tmp/epel-release.rpm "$epel_url"
-    
-    # Validate RPM
-    if ! file /tmp/epel-release.rpm | grep -q 'RPM'; then
+    echo "[INFO] Downloading EPEL repository for CentOS/RHEL $OS_VERSION..."
+    curl -Lo /tmp/epel-release.rpm "$EPEL_URL"
+
+    echo "[INFO] Validating downloaded RPM..."
+    if ! file /tmp/epel-release.rpm | grep -q "RPM" || ! rpm -K /tmp/epel-release.rpm &>/dev/null; then
         echo "[ERROR] Downloaded file is not a valid RPM"
-        rm -f /tmp/epel-release.rpm
-        exit 1
+        return 1
     fi
 
-    yum install -y /tmp/epel-release.rpm
+    echo "[INFO] Installing EPEL..."
+    yum install -y /tmp/epel-release.rpm || { echo "[ERROR] Failed to install EPEL."; return 1; }
     rm -f /tmp/epel-release.rpm
 }
 
-function install_fail2ban() {
-    detect_os
+install_fail2ban() {
+    echo "[INFO] Installing Fail2Ban..."
+    yum install -y fail2ban || { echo "[ERROR] Fail2Ban installation failed."; return 1; }
 
-    echo "[INFO] Installing Fail2Ban on $OS_ID $OS_VERSION_ID..."
-
-    if [[ "$OS_ID" == "centos" || "$OS_ID" == "rhel" ]]; then
-        install_epel
-        yum install -y fail2ban
-    elif [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
-        apt update && apt install -y fail2ban
-    else
-        echo "[ERROR] Unsupported OS: $OS_ID"
-        exit 1
-    fi
-
+    echo "[INFO] Enabling and starting Fail2Ban..."
     systemctl enable fail2ban
     systemctl start fail2ban
 
-    cat >/etc/fail2ban/jail.local <<EOF
+    echo "[INFO] Configuring jail.local for SSH..."
+    cat > /etc/fail2ban/jail.local <<EOF
 [sshd]
 enabled = true
 port = ssh
 filter = sshd
-logpath = /var/log/auth.log
+logpath = /var/log/secure
 maxretry = 5
 bantime = 3600
 findtime = 600
 EOF
 
-    echo "[INFO] Fail2Ban installed and configured."
+    echo "[INFO] Restarting Fail2Ban..."
+    systemctl restart fail2ban
+    echo "[SUCCESS] Fail2Ban SSH protection installed and configured."
 }
 
-function remove_fail2ban() {
-    detect_os
-
-    echo "[INFO] Removing Fail2Ban..."
-
-    if [[ "$OS_ID" == "centos" || "$OS_ID" == "rhel" ]]; then
-        yum remove -y fail2ban
-    elif [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
-        apt remove -y fail2ban
-    fi
-
-    rm -rf /etc/fail2ban
-    echo "[INFO] Fail2Ban and configs removed."
+remove_fail2ban() {
+    echo "[INFO] Stopping and removing Fail2Ban..."
+    systemctl stop fail2ban
+    yum remove -y fail2ban
+    rm -f /etc/fail2ban/jail.local
+    echo "[SUCCESS] Fail2Ban and configs removed."
 }
 
-function monitor_fail2ban() {
+monitor_fail2ban() {
     echo "========= Fail2Ban Monitor ========="
     echo "1) View live SSH ban logs"
     echo "2) View SSH jail status"
@@ -100,33 +78,47 @@ function monitor_fail2ban() {
     echo "4) View firewall ban rules (iptables/nftables)"
     echo "q) Back to main menu"
     echo "===================================="
-    read -rp "Choose an option: " mon_choice
+    read -rp "Choose an option: " monopt
 
-    case $mon_choice in
+    case "$monopt" in
         1) journalctl -u fail2ban -f ;;
         2) fail2ban-client status sshd ;;
         3) fail2ban-client status ;;
-        4) iptables -L -n --line-numbers ;;
-        q) return ;;
-        *) echo "[WARN] Invalid option" ;;
+        4) iptables -L -n --line-numbers || nft list ruleset ;;
+        q|Q) return ;;
+        *) echo "[WARN] Invalid option." ;;
     esac
 }
 
-# Main Menu
-while true; do
-    echo "========= Fail2Ban Manager ========="
-    echo "1) Install Fail2Ban SSH protection"
-    echo "2) Remove Fail2Ban and all configs"
-    echo "3) Monitor/Report Fail2Ban activity"
-    echo "q) Quit"
-    echo "===================================="
-    read -rp "Choose an option: " choice
+main_menu() {
+    while true; do
+        echo "========= Fail2Ban Manager ========="
+        echo "1) Install Fail2Ban SSH protection"
+        echo "2) Remove Fail2Ban and all configs"
+        echo "3) Monitor/Report Fail2Ban activity"
+        echo "q) Quit"
+        echo "===================================="
+        read -rp "Choose an option: " option
 
-    case $choice in
-        1) install_fail2ban ;;
-        2) remove_fail2ban ;;
-        3) monitor_fail2ban ;;
-        q) exit 0 ;;
-        *) echo "[WARN] Invalid selection" ;;
-    esac
-done
+        case "$option" in
+            1)
+                install_epel && install_fail2ban
+                ;;
+            2)
+                remove_fail2ban
+                ;;
+            3)
+                monitor_fail2ban
+                ;;
+            q|Q)
+                echo "[INFO] Exiting. Goodbye."
+                exit 0
+                ;;
+            *)
+                echo "[WARN] Invalid option. Try again."
+                ;;
+        esac
+    done
+}
+
+main_menu
