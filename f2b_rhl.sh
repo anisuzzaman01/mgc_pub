@@ -1,98 +1,132 @@
 #!/bin/bash
 
+# Fail2Ban Manager with OS detection and EPEL fix
 set -e
 
-# === System Detection ===
-OS=""
-VERSION_ID=""
+EPEL_URL_C7="https://mirrors.aliyun.com/epel/epel-release-latest-7.noarch.rpm"
+EPEL_URL_C8="https://mirrors.aliyun.com/epel/epel-release-latest-8.noarch.rpm"
+EPEL_URL_C9="https://mirrors.aliyun.com/epel/epel-release-latest-9.noarch.rpm"
 
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$ID
-    VERSION_ID=$VERSION_ID
-else
-    echo "[ERROR] Cannot detect OS."
-    exit 1
-fi
-
-# === Logging ===
-log() {
-    echo -e "[INFO] $1"
+function detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_ID=$ID
+        OS_VERSION_ID=${VERSION_ID%%.*}
+    elif [ -f /etc/centos-release ]; then
+        OS_ID="centos"
+        OS_VERSION_ID=$(rpm -q --qf "%{VERSION}" centos-release)
+    else
+        echo "[ERROR] Unsupported OS."
+        exit 1
+    fi
 }
 
-err() {
-    echo -e "[ERROR] $1"
-    exit 1
-}
+function install_epel() {
+    echo "[INFO] Installing EPEL repository..."
 
-# === EPEL Setup ===
-install_epel() {
-    log "Installing EPEL repository..."
-
-    case "$VERSION_ID" in
-        7)
-            EPEL_RPM="epel-release-7-13.noarch.rpm"
-            EPEL_URL="https://mirrors.aliyun.com/epel/$EPEL_RPM"
-            ;;
-        8)
-            EPEL_RPM="epel-release-latest-8.noarch.rpm"
-            EPEL_URL="https://mirrors.aliyun.com/epel/$EPEL_RPM"
-            ;;
-        9)
-            EPEL_RPM="epel-release-latest-9.noarch.rpm"
-            EPEL_URL="https://mirrors.aliyun.com/epel/$EPEL_RPM"
-            ;;
-        *)
-            err "Unsupported version: $VERSION_ID"
-            ;;
+    local epel_url=""
+    case "$OS_VERSION_ID" in
+        7) epel_url=$EPEL_URL_C7 ;;
+        8) epel_url=$EPEL_URL_C8 ;;
+        9) epel_url=$EPEL_URL_C9 ;;
+        *) echo "[ERROR] Unsupported RHEL/CentOS version"; exit 1 ;;
     esac
 
-    curl -Lo /tmp/$EPEL_RPM "$EPEL_URL" || err "Failed to download EPEL from $EPEL_URL"
+    curl -Lo /tmp/epel-release.rpm "$epel_url"
     
-    file_type=$(file /tmp/$EPEL_RPM)
-    echo "$file_type" | grep -q "RPM" || err "Downloaded file is not a valid RPM"
+    # Validate RPM
+    if ! file /tmp/epel-release.rpm | grep -q 'RPM'; then
+        echo "[ERROR] Downloaded file is not a valid RPM"
+        rm -f /tmp/epel-release.rpm
+        exit 1
+    fi
 
-    yum install -y /tmp/$EPEL_RPM || err "YUM failed to install EPEL"
+    yum install -y /tmp/epel-release.rpm
+    rm -f /tmp/epel-release.rpm
 }
 
-# === Fail2Ban Installation ===
-install_fail2ban() {
-    log "Installing Fail2Ban..."
-    yum install -y fail2ban || err "Fail2Ban installation failed"
+function install_fail2ban() {
+    detect_os
+
+    echo "[INFO] Installing Fail2Ban on $OS_ID $OS_VERSION_ID..."
+
+    if [[ "$OS_ID" == "centos" || "$OS_ID" == "rhel" ]]; then
+        install_epel
+        yum install -y fail2ban
+    elif [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
+        apt update && apt install -y fail2ban
+    else
+        echo "[ERROR] Unsupported OS: $OS_ID"
+        exit 1
+    fi
+
     systemctl enable fail2ban
     systemctl start fail2ban
-}
 
-# === SSH Jail Configuration ===
-configure_ssh_jail() {
-    log "Configuring Fail2Ban SSH jail..."
-    JAIL_LOCAL="/etc/fail2ban/jail.local"
-    cp /etc/fail2ban/jail.conf "$JAIL_LOCAL"
-
-    sed -i '/^\[sshd\]/,/^\[.*\]/d' "$JAIL_LOCAL"
-
-    cat <<EOF >> "$JAIL_LOCAL"
+    cat >/etc/fail2ban/jail.local <<EOF
 [sshd]
 enabled = true
 port = ssh
 filter = sshd
-logpath = /var/log/secure
+logpath = /var/log/auth.log
 maxretry = 5
-bantime = 600
+bantime = 3600
 findtime = 600
 EOF
 
-    systemctl restart fail2ban
+    echo "[INFO] Fail2Ban installed and configured."
 }
 
-# === Main ===
-log "Detected OS: $OS $VERSION_ID"
+function remove_fail2ban() {
+    detect_os
 
-if [[ "$OS" =~ (centos|rhel|almalinux|rocky) ]]; then
-    install_epel
-    install_fail2ban
-    configure_ssh_jail
-    log "Fail2Ban installed and configured successfully."
-else
-    err "Unsupported OS: $OS"
-fi
+    echo "[INFO] Removing Fail2Ban..."
+
+    if [[ "$OS_ID" == "centos" || "$OS_ID" == "rhel" ]]; then
+        yum remove -y fail2ban
+    elif [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
+        apt remove -y fail2ban
+    fi
+
+    rm -rf /etc/fail2ban
+    echo "[INFO] Fail2Ban and configs removed."
+}
+
+function monitor_fail2ban() {
+    echo "========= Fail2Ban Monitor ========="
+    echo "1) View live SSH ban logs"
+    echo "2) View SSH jail status"
+    echo "3) View all jail summary"
+    echo "4) View firewall ban rules (iptables/nftables)"
+    echo "q) Back to main menu"
+    echo "===================================="
+    read -rp "Choose an option: " mon_choice
+
+    case $mon_choice in
+        1) journalctl -u fail2ban -f ;;
+        2) fail2ban-client status sshd ;;
+        3) fail2ban-client status ;;
+        4) iptables -L -n --line-numbers ;;
+        q) return ;;
+        *) echo "[WARN] Invalid option" ;;
+    esac
+}
+
+# Main Menu
+while true; do
+    echo "========= Fail2Ban Manager ========="
+    echo "1) Install Fail2Ban SSH protection"
+    echo "2) Remove Fail2Ban and all configs"
+    echo "3) Monitor/Report Fail2Ban activity"
+    echo "q) Quit"
+    echo "===================================="
+    read -rp "Choose an option: " choice
+
+    case $choice in
+        1) install_fail2ban ;;
+        2) remove_fail2ban ;;
+        3) monitor_fail2ban ;;
+        q) exit 0 ;;
+        *) echo "[WARN] Invalid selection" ;;
+    esac
+done
