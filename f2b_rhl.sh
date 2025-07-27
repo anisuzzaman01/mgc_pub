@@ -1,36 +1,33 @@
 #!/bin/bash
 
-# ========== Fail2Ban Manager for RHEL/CentOS ==========
-clear
-set -euo pipefail
+# Fail2Ban Manager Script for RHEL/CentOS 7
+# Author: ChatGPT | Version: 1.0
 
-# ========== Colors ==========
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[1;34m'
-CYAN='\033[1;36m'
-NC='\033[0m'
+set -e
 
-# ========== Logging Helpers ==========
-log_info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
-log_done()  { echo -e "${GREEN}[✔]${NC} $*"; }
-
-# ========== Custom SSHD Jail Block ==========
-CUSTOM_SSHD_BLOCK="[sshd]
+EPEL_URL="https://download.fedoraproject.org/pub/epel/7/x86_64/Packages/e/epel-release-7-13.noarch.rpm"
+EPEL_RPM="/tmp/epel-release-7-13.noarch.rpm"
+JAIL_LOCAL="/etc/fail2ban/jail.local"
+SSH_JAIL_CONFIG="
+[sshd]
 enabled = true
 port = ssh
 filter = sshd
 logpath = /var/log/secure
 maxretry = 3
-findtime = 600
 bantime = 3600
-backend = systemd
-action = iptables[name=SSH, port=ssh, protocol=tcp]"
+findtime = 600
+"
 
-# ========== Root & Binary Check ==========
+# === Helper Functions ===
+
+log_info() { echo -e "\e[32m[INFO]\e[0m $1"; }
+log_error() { echo -e "\e[31m[ERROR]\e[0m $1"; }
+
+pause() {
+    read -rp $'\nPress ENTER to continue...'
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root."
@@ -38,194 +35,108 @@ check_root() {
     fi
 }
 
-check_binary() {
-    command -v "$1" >/dev/null 2>&1 || { log_error "'$1' is required but not installed."; exit 1; }
-}
-
-# ========== Detect package manager ==========
-get_pkg_mgr() {
-    if command -v dnf >/dev/null 2>&1; then
-        echo "dnf"
-    elif command -v yum >/dev/null 2>&1; then
-        echo "yum"
-    else
-        log_error "No supported package manager found (yum or dnf)."
-        exit 1
-    fi
-}
-
-# ========== EPEL installer with fixed download location ==========
 install_epel() {
     if rpm -q epel-release &>/dev/null; then
-        log_info "EPEL repository already installed."
-        return
+        log_info "EPEL is already installed."
+        return 0
     fi
 
-    log_info "Installing EPEL repository manually..."
+    log_info "Installing EPEL repository..."
 
-    local epel_rpm="epel-release-latest-7.noarch.rpm"
-    local epel_rpm_tmp="/tmp/${epel_rpm}"
+    rm -f "$EPEL_RPM"
+    curl -s -L -o "$EPEL_RPM" "$EPEL_URL"
 
-    # Clean old files if exist
-    [[ -f "$epel_rpm" ]] && rm -f "$epel_rpm"
-    [[ -f "$epel_rpm_tmp" ]] && rm -f "$epel_rpm_tmp"
-
-    # Download to current dir
-    if command -v curl >/dev/null 2>&1; then
-        curl -LO https://dl.fedoraproject.org/pub/epel/${epel_rpm} || {
-            log_error "curl failed to download EPEL RPM."
-            exit 1
-        }
-    elif command -v wget >/dev/null 2>&1; then
-        wget https://dl.fedoraproject.org/pub/epel/${epel_rpm} || {
-            log_error "wget failed to download EPEL RPM."
-            exit 1
-        }
-    else
-        log_error "Neither curl nor wget is installed."
+    if [[ ! -s "$EPEL_RPM" ]]; then
+        log_error "Downloaded EPEL RPM is empty or failed."
         exit 1
     fi
 
-    # Move to /tmp explicitly
-    mv "$epel_rpm" "$epel_rpm_tmp"
-
-    # Verify
-    if [[ ! -s "$epel_rpm_tmp" ]]; then
-        log_error "EPEL RPM file not found or empty: $epel_rpm_tmp"
-        exit 1
-    fi
-
-    yum install -y "$epel_rpm_tmp" || {
-        log_error "Failed to install EPEL repository."
+    yum install -y "$EPEL_RPM" || {
+        log_error "Failed to install EPEL."
         exit 1
     }
 
-    rm -f "$epel_rpm_tmp"
+    log_info "EPEL installed successfully."
 }
 
-# ========== Install Fail2Ban ==========
 install_fail2ban() {
-    PKG_MGR=$(get_pkg_mgr)
-
-    log_info "Installing EPEL and Fail2Ban..."
     install_epel
 
-    $PKG_MGR install -y fail2ban
+    log_info "Installing Fail2Ban..."
+    yum install -y fail2ban
 
     systemctl enable fail2ban
     systemctl start fail2ban
 
-    log_info "Backing up and modifying jail.local..."
-    cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local || true
+    log_info "Fail2Ban installed and started."
 
-    awk -v block="$CUSTOM_SSHD_BLOCK" '
-        BEGIN {skip=0}
-        /^\[sshd\]/ {print block; skip=1; next}
-        skip && /^\[.*\]/ {skip=0}
-        !skip {print}
-    ' /etc/fail2ban/jail.local > /tmp/jail.local && mv /tmp/jail.local /etc/fail2ban/jail.local
-
-    systemctl restart fail2ban
-    log_done "Fail2Ban installed and SSH protection configured."
-}
-
-# ========== Remove Fail2Ban ==========
-remove_fail2ban() {
-    read -rp "$(echo -e "${YELLOW}Are you sure you want to remove Fail2Ban? [y/N]: ${NC}")" confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        PKG_MGR=$(get_pkg_mgr)
-
-        log_info "Stopping Fail2Ban..."
-        systemctl stop fail2ban
-
-        $PKG_MGR remove -y fail2ban
-
-        log_info "Removing Fail2Ban configs and logs..."
-        rm -rf /etc/fail2ban /var/log/fail2ban.log /var/lib/fail2ban /var/run/fail2ban
-
-        log_done "Fail2Ban completely removed."
-    else
-        log_info "Uninstall aborted."
+    if [[ -f "$JAIL_LOCAL" ]]; then
+        cp "$JAIL_LOCAL" "${JAIL_LOCAL}.bak"
     fi
+
+    echo "$SSH_JAIL_CONFIG" > "$JAIL_LOCAL"
+    systemctl restart fail2ban
+
+    log_info "SSH jail configured in jail.local."
 }
 
-# ========== Monitor Fail2Ban ==========
+remove_fail2ban() {
+    log_info "Removing Fail2Ban and its config..."
+
+    systemctl stop fail2ban || true
+    yum remove -y fail2ban || true
+
+    rm -f /etc/fail2ban/jail.local
+    rm -f /etc/fail2ban/jail.d/*
+
+    log_info "Fail2Ban and configs removed."
+}
+
 monitor_fail2ban() {
-    while true; do
-        echo -e "\n${CYAN}========= Fail2Ban Monitor =========${NC}"
-        echo -e "${YELLOW}1${NC}) View live SSH ban logs"
-        echo -e "${YELLOW}2${NC}) View SSH jail status"
-        echo -e "${YELLOW}3${NC}) View all jail summary"
-        echo -e "${YELLOW}4${NC}) View firewall ban rules (iptables/nftables)"
-        echo -e "${YELLOW}q${NC}) Back to main menu"
-        echo -e "${CYAN}====================================${NC}"
-        read -rp "$(echo -e "${CYAN}Choose an option: ${NC}")" monitor_choice
+    clear
+    echo "========= Fail2Ban Monitor ========="
+    echo "1) View live SSH ban logs"
+    echo "2) View SSH jail status"
+    echo "3) View all jail summary"
+    echo "4) View firewall ban rules (iptables)"
+    echo "q) Back to main menu"
+    echo "===================================="
+    read -rp "Choose an option: " choice
 
-        case "$monitor_choice" in
-            1)
-                log_info "Press Ctrl+C to stop logs."
-                tail -f /var/log/fail2ban.log
-                ;;
-            2)
-                fail2ban-client status sshd || log_warn "SSH jail not found."
-                ;;
-            3)
-                fail2ban-client status || log_warn "Fail2Ban status not available."
-                ;;
-            4)
-                if command -v nft >/dev/null && nft list ruleset 2>/dev/null | grep -q fail2ban; then
-                    echo -e "${YELLOW}[+] nftables rules detected:${NC}"
-                    nft list ruleset | grep -A10 fail2ban
-                elif iptables -L -n | grep -q "f2b-"; then
-                    echo -e "${YELLOW}[+] iptables rules detected:${NC}"
-                    iptables -L -n --line-numbers | grep "f2b-"
-                    for chain in $(iptables -S | grep -o 'f2b-[a-zA-Z0-9_-]*' | sort -u); do
-                        echo -e "\n${BLUE}Chain: $chain${NC}"
-                        iptables -L "$chain" -n --line-numbers
-                    done
-                else
-                    log_warn "No ban rules found."
-                fi
-                ;;
-            q|Q)
-                break
-                ;;
-            *)
-                log_warn "Invalid option."
-                ;;
-        esac
-    done
+    case "$choice" in
+        1) journalctl -u fail2ban -f ;;
+        2) fail2ban-client status sshd ;;
+        3) fail2ban-client status ;;
+        4) iptables -L -n --line-numbers ;;
+        q|Q) return ;;
+        *) echo "Invalid option." ;;
+    esac
+
+    pause
 }
 
-# ========== Main Menu ==========
+# === Main Menu ===
+
 main_menu() {
     check_root
-    check_binary systemctl
-    check_binary iptables
-
     while true; do
-        echo -e "\n${BLUE}========= Fail2Ban Manager =========${NC}"
-        echo -e "${YELLOW}1${NC}) Install Fail2Ban SSH protection"
-        echo -e "${YELLOW}2${NC}) Remove Fail2Ban and all configs"
-        echo -e "${YELLOW}3${NC}) Monitor/Report Fail2Ban activity"
-        echo -e "${YELLOW}q${NC}) Quit"
-        echo -e "${BLUE}====================================${NC}"
-        read -rp "$(echo -e "${CYAN}Choose an option: ${NC}")" main_choice
+        clear
+        echo "========= Fail2Ban Manager ========="
+        echo "1) Install Fail2Ban SSH protection"
+        echo "2) Remove Fail2Ban and all configs"
+        echo "3) Monitor/Report Fail2Ban activity"
+        echo "q) Quit"
+        echo "===================================="
+        read -rp "Choose an option: " choice
 
-        case "$main_choice" in
-            1) install_fail2ban ;;
-            2) remove_fail2ban ;;
+        case "$choice" in
+            1) install_fail2ban; pause ;;
+            2) remove_fail2ban; pause ;;
             3) monitor_fail2ban ;;
-            q|Q)
-                log_done "Goodbye!"
-                exit 0
-                ;;
-            *)
-                log_warn "Invalid option."
-                ;;
+            q|Q) echo "Goodbye!"; exit 0 ;;
+            *) echo "Invalid choice."; pause ;;
         esac
     done
 }
 
-# ========== Start Script ==========
 main_menu
