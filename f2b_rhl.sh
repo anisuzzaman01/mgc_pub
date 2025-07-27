@@ -9,7 +9,7 @@ install_epel() {
 
     case "$OS_VERSION" in
         7)
-            EPEL_URL="https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm"
+            EPEL_URL="http://mirror.centos.org/centos/7/extras/x86_64/Packages/epel-release-7-13.noarch.rpm"
             ;;
         8)
             EPEL_URL="https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
@@ -24,11 +24,11 @@ install_epel() {
     esac
 
     echo "[INFO] Downloading EPEL repository for CentOS/RHEL $OS_VERSION..."
-    curl -Lo /tmp/epel-release.rpm "$EPEL_URL"
+    curl -L -o /tmp/epel-release.rpm "$EPEL_URL"
 
     echo "[INFO] Validating downloaded RPM..."
-    if ! file /tmp/epel-release.rpm | grep -q "RPM" || ! rpm -K /tmp/epel-release.rpm &>/dev/null; then
-        echo "[ERROR] Downloaded file is not a valid RPM"
+    if ! rpm -K /tmp/epel-release.rpm &>/dev/null; then
+        echo "[ERROR] Downloaded file is not a valid RPM or corrupted"
         return 1
     fi
 
@@ -36,6 +36,7 @@ install_epel() {
     yum install -y /tmp/epel-release.rpm || { echo "[ERROR] Failed to install EPEL."; return 1; }
     rm -f /tmp/epel-release.rpm
 }
+
 
 install_fail2ban() {
     echo "[INFO] Installing Fail2Ban..."
